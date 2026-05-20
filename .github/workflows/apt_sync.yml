@@ -1,0 +1,57 @@
+name: Daily Ubuntu APT Sync
+on:
+  schedule:
+    - cron: '0 6 * * *' # Runs automatically every day at 6 AM
+  workflow_dispatch: # Allows you to force an update click manually
+
+jobs:
+  sync-apt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Fetch, Decompress, and Parse Live Repository
+        run: |
+          echo "Downloading official Ubuntu core manifest..."
+          # Fetch directly from the source mirror without browser restrictions
+          curl -s http://ports.ubuntu.com/ubuntu-ports/dists/noble/main/binary-arm64/Packages.gz --output Packages.gz
+          
+          echo "Decompressing and optimizing layout..."
+          gunzip -c Packages.gz > raw_packages.txt
+          
+          echo "Running structural parser engine..."
+          # Uses a native terminal routine to convert the messy Debian control fields into an aggressive, ultra-lightweight JSON file
+          awk '
+            BEGIN { print "[" }
+            /^Package:/ { pkg=$2 }
+            /^Version:/ { ver=$2 }
+            /^Section:/ { sec=$2 }
+            /^Size:/ { siz=$2 }
+            /^Filename:/ { fil=$2 }
+            /^Description:/ { 
+              sub(/^Description: /, ""); 
+              desc=$0; 
+              getline; 
+              while ($0 ~ /^ /) { desc=desc "\\n" $0; getline; }
+              # Clean up quotes for valid JSON structural parsing
+              gsub(/"/, "\\\"", desc);
+              gsub(/\\/, "\\\\", desc);
+              printf "{\"package\":\"%s\",\"version\":\"%s\",\"section\":\"%s\",\"size\":%s,\"filename\":\"%s\",\"description\":\"%s\"},\n", pkg, ver, sec, siz, fil, desc
+            }
+            END { print "{}]" }
+          ' raw_packages.txt > temp_packages.json
+          
+          # Clean up the trailing comma to make it valid JSON syntax
+          sed 's/},\n{}/}/g' temp_packages.json > packages.json
+          
+          # Clean up workspace trash files
+          rm Packages.gz raw_packages.txt temp_packages.json
+
+      - name: Push Optimized Matrix to Repository
+        run: |
+          git config --global user.name "AptDataBot"
+          git config --global user.email "bot@ubuntu.explorer"
+          git add packages.json
+          git commit -m "Automated synchronization of official APT package matrix" || exit 0
+          git push
