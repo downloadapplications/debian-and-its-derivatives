@@ -16,28 +16,35 @@ jobs:
         with:
           node-cache: false
 
-      - name: Fetch, Decompress, and Parse with Node
+      - name: Fetch, Decompress, and Merge Repositories
         run: |
-          echo "Downloading official Ubuntu core manifest..."
-          curl -s http://ports.ubuntu.com/ubuntu-ports/dists/noble/main/binary-arm64/Packages.gz --output Packages.gz
-          gunzip Packages.gz
+          echo "Downloading official Ubuntu Main and Universe manifests..."
+          curl -s http://ports.ubuntu.com/ubuntu-ports/dists/noble/main/binary-arm64/Packages.gz --output Main.gz
+          curl -s http://ports.ubuntu.com/ubuntu-ports/dists/noble/universe/binary-arm64/Packages.gz --output Universe.gz
+          
+          gunzip Main.gz
+          gunzip Universe.gz
 
-          echo "Running robust Node parser..."
+          echo "Running robust multi-repo Node parser..."
           node -e '
           const fs = require("fs");
           const readline = require("readline");
 
-          async function parse() {
-            const fileStream = fs.createReadStream("Packages");
+          async function parseRepo(fileName, repoArray) {
+            const fileStream = fs.createReadStream(fileName);
             const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
 
-            let packages = [];
             let current = {};
 
             for await (const line of rl) {
               if (line.trim() === "") {
                 if (current.package && current.filename) {
-                  packages.push(current);
+                  // OPTIONAL OPTIMIZATION: Filter out debug symbols and development headers 
+                  // to keep files fast if you want to prioritize consumer applications
+                  const isDevOrDbg = current.package.endsWith("-dev") || current.package.endsWith("-dbg") || current.package.includes("-modules-");
+                  if (!isDevOrDbg) {
+                    repoArray.push(current);
+                  }
                 }
                 current = {};
                 continue;
@@ -54,20 +61,30 @@ jobs:
                 current.description += "\n" + line.trim();
               }
             }
-            if (current.package && current.filename) packages.push(current);
-
-            // Save clean, minified, structurally valid JSON
-            fs.writeFileSync("packages.json", JSON.stringify(packages));
-            console.log(`Successfully compiled ${packages.length} valid package records.`);
+            if (current.package && current.filename) repoArray.push(current);
           }
-          parse();
+
+          async function main() {
+            let allPackages = [];
+            
+            console.log("Parsing Main...");
+            await parseRepo("Main", allPackages);
+            
+            console.log("Parsing Universe...");
+            await parseRepo("Universe", allPackages);
+
+            fs.writeFileSync("packages.json", JSON.stringify(allPackages));
+            console.log(`Successfully compiled ${allPackages.length} application records.`);
+          }
+
+          main();
           '
-          rm Packages
+          rm Main Universe
 
       - name: Push Optimized Matrix to Repository
         run: |
           git config --global user.name "AptDataBot"
           git config --global user.email "bot@ubuntu.explorer"
           git add packages.json
-          git commit -m "Automated synchronization of official APT package matrix" || exit 0
+          git commit -m "Automated synchronization of combined APT Main and Universe matrix" || exit 0
           git push
